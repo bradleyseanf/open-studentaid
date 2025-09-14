@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "open-studentaid"
+version = "0.1.0"
+description = "Open source Python wrapper for StudentAid.gov servicer APIs"
+authors = [{ name="Bradley Florence" }]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests",
+    "python-dotenv",
+    "beautifulsoup4",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["open_studentaid*"]
