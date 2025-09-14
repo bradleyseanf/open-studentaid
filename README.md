@@ -22,39 +22,43 @@ Clone this repo and install requirements:
 git clone https://github.com/bradleyseanf/open-studentaid.git
 cd open-studentaid
 python -m venv .venv
-source .venv/bin/activate   # or .venv\Scripts\activate on Windows
+# Activate the venv
+source .venv/bin/activate   # Linux/Mac
+.\.venv\Scripts\activate    # Windows PowerShell
 pip install -U pip -r requirements.txt
-⚙️ Setup
+
+Setup
+
 Create a .env file in the project root:
 
-ini
-Copy code
 STUDENT_USERNAME=your_username_here
 STUDENT_PASSWORD=your_password_here
 STUDENT_PROVIDER=nelnet   # or cri, etc.
+
+
 The wrapper will manage MFA prompts automatically (e.g., text/email code).
 
+.
+
 🚀 Usage Example
-python
-Copy code
 from open_studentaid import login_full, loan_summary
 
-# Perform login + MFA once, session is cached
 tokens = login_full(
-    username="your_username",
-    password="your_password",
+    username="your_username_here",
+    password="your_password_here",
     provider="nelnet"
 )
 
-# Fetch loan summary
 summary = loan_summary(tokens)
 print(summary)
-🛠️ Functions Overview
+
+
+📚 Functions Overview
+
 The main functions currently available in open_studentaid are:
 
 login(username, password, provider)
-Starts the login flow but does not complete MFA.
-Returns the next step in the flow.
+Starts the login flow but does not complete MFA. Returns the next step in the flow.
 
 login_full(username, password, provider, debug=False)
 Complete login + MFA in one call.
@@ -68,7 +72,8 @@ ensure_access_token(tokens)
 Utility that checks if the current access token is still valid.
 If expired, it will refresh using the refresh token.
 
-🛡️ Security & Privacy
+🔒 Security & Privacy
+
 Credentials are never uploaded anywhere; they stay local.
 
 Tokens are cached locally in ~/.studentaid_tokens.json.
@@ -76,6 +81,7 @@ Tokens are cached locally in ~/.studentaid_tokens.json.
 Only read-only scopes (mma.api.read) are requested.
 
 🤝 Contributing
+
 Pull requests are welcome!
 If you’d like to add support for additional servicers or endpoints:
 
@@ -86,4 +92,5 @@ Create a feature branch
 Submit a PR
 
 📄 License
+
 This project is licensed under the MIT License — see LICENSE for details.
