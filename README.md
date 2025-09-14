@@ -26,21 +26,25 @@ python -m venv .venv
 source .venv/bin/activate   # Linux/Mac
 .\.venv\Scripts\activate    # Windows PowerShell
 pip install -U pip -r requirements.txt
+```
 
-Setup
+### Setup
 
-Create a .env file in the project root:
+Create a `.env` file in the project root:
 
+```env
 STUDENT_USERNAME=your_username_here
 STUDENT_PASSWORD=your_password_here
 STUDENT_PROVIDER=nelnet   # or cri, etc.
-
+```
 
 The wrapper will manage MFA prompts automatically (e.g., text/email code).
 
-.
+---
 
-🚀 Usage Example
+## 🚀 Usage Example
+
+```python
 from open_studentaid import login_full, loan_summary
 
 tokens = login_full(
@@ -51,46 +55,47 @@ tokens = login_full(
 
 summary = loan_summary(tokens)
 print(summary)
+```
 
+---
 
-📚 Functions Overview
+## 📚 Functions Overview
 
-The main functions currently available in open_studentaid are:
+The main functions currently available in `open_studentaid` are:
 
-login(username, password, provider)
-Starts the login flow but does not complete MFA. Returns the next step in the flow.
+- **`login(username, password, provider)`**  
+  Starts the login flow but does not complete MFA. Returns the next step in the flow.
 
-login_full(username, password, provider, debug=False)
-Complete login + MFA in one call.
-Returns an OAuth2 tokens dictionary that includes access_token and refresh_token.
+- **`login_full(username, password, provider, debug=False)`**  
+  Complete login + MFA in one call.  
+  Returns an OAuth2 tokens dictionary that includes `access_token` and `refresh_token`.
 
-loan_summary(tokens)
-Uses a valid access token to fetch a borrower’s loan summary.
-Returns details such as balances, loan counts, and groupings.
+- **`loan_summary(tokens)`**  
+  Uses a valid access token to fetch a borrower’s loan summary.  
+  Returns details such as balances, loan counts, and groupings.
 
-ensure_access_token(tokens)
-Utility that checks if the current access token is still valid.
-If expired, it will refresh using the refresh token.
+- **`ensure_access_token(tokens)`**  
+  Utility that checks if the current access token is still valid.  
+  If expired, it will refresh using the refresh token.
 
-🔒 Security & Privacy
+---
 
-Credentials are never uploaded anywhere; they stay local.
+## 🔒 Security & Privacy
+- Credentials are never uploaded anywhere; they stay local.  
+- Tokens are cached locally in `~/.studentaid_tokens.json`.  
+- Only read-only scopes (`mma.api.read`) are requested.  
 
-Tokens are cached locally in ~/.studentaid_tokens.json.
+---
 
-Only read-only scopes (mma.api.read) are requested.
-
-🤝 Contributing
-
-Pull requests are welcome!
+## 🤝 Contributing
+Pull requests are welcome!  
 If you’d like to add support for additional servicers or endpoints:
 
-Fork the repo
+1. Fork the repo  
+2. Create a feature branch  
+3. Submit a PR  
 
-Create a feature branch
+---
 
-Submit a PR
-
-📄 License
-
-This project is licensed under the MIT License — see LICENSE for details.
+## 📄 License
+This project is licensed under the MIT License — see [LICENSE](LICENSE) for details.
