@@ -1,8 +1,0 @@
-README.md
-pyproject.toml
-open_studentaid/__init__.py
-open_studentaid.egg-info/PKG-INFO
-open_studentaid.egg-info/SOURCES.txt
-open_studentaid.egg-info/dependency_links.txt
-open_studentaid.egg-info/requires.txt
-open_studentaid.egg-info/top_level.txt
