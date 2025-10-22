@@ -1,90 +1,86 @@
-# Open StudentAid API Wrapper
+# 🏛️ Open StudentAid API Wrapper
 
-A Python library that provides a simple interface for accessing loan and account data from StudentAid.gov servicers (e.g. Nelnet, CRI).  
-This project is designed to be **open, local, and user-friendly** — you control your own credentials and session locally.
+A Python library providing a clean interface for accessing loan and account data from StudentAid.gov servicers (e.g., **Nelnet**, **CRI**).  
+It’s designed to be **open, local, and secure** — you control your credentials and tokens, stored only on your machine.
 
 ---
 
 ## ✨ Features
-- Login flow with username, password, and MFA (text/email codes).
-- Automatic session/token handling (refresh & reuse).
-- Consistent wrapper methods across different servicers (e.g. `loan_summary()` works for Nelnet, CRI, etc).
-- Environment-based credentials (`.env` file).
-- Read-only scopes by default for safety.
+- Interactive **browser login with MFA** (text/email codes)
+- **Automatic token caching** and refresh via local session store
+- Consistent API surface across servicers (`loan_summary()`, etc.)
+- Works with `.env` credentials or direct parameters
+- Read-only scopes by default for safety
 
 ---
 
 ## 📦 Installation
 
-Clone this repo and install requirements:
+Clone the repository and install dependencies:
 
-```bash
-git clone https://github.com/bradleyseanf/open-studentaid.git
-cd open-studentaid
-python -m venv .venv
-# Activate the venv
-source .venv/bin/activate   # Linux/Mac
-.\.venv\Scripts\activate    # Windows PowerShell
-pip install -U pip -r requirements.txt
-```
+    git clone https://github.com/bradleyseanf/open-studentaid.git
+    cd open-studentaid
+    python -m venv .venv
+    # Activate the environment
+    # Linux/Mac:
+    source .venv/bin/activate
+    # Windows PowerShell:
+    .\.venv\Scripts\activate
+    pip install -U pip -r requirements.txt
 
-### Setup
+### Optional: environment variables
 
-Create a `.env` file in the project root:
+Create a `.env` file in the root for convenience:
 
-```env
-STUDENT_USERNAME=your_username_here
-STUDENT_PASSWORD=your_password_here
-STUDENT_PROVIDER=nelnet   # or cri, etc.
-```
-
-The wrapper will manage MFA prompts automatically (e.g., text/email code).
+    STUDENT_AID_PROVIDER=nelnet   # or cri
+    CLIENT_ID=mma
 
 ---
 
-## 🚀 Usage Example
+## 🚀 Quick Start
 
-```python
-from open_studentaid import login_full, loan_summary
+    from open_studentaid import browser_login, ensure_login, loan_summary
 
-tokens = login_full(
-    username="your_username_here",
-    password="your_password_here",
-    provider="nelnet"
-)
+    # 1️⃣ First-time login (opens real browser, completes MFA)
+    browser_login(provider="nelnet", debug=True)
 
-summary = loan_summary(tokens)
-print(summary)
-```
+    # 2️⃣ Auto-refresh and fetch your loan data
+    ensure_login(provider="nelnet")
+    total, count, raw = loan_summary(provider="nelnet")
+
+    print(f"You have {count} loans, total balance: ${total:,.2f}")
 
 ---
 
-## 📚 Functions Overview
+## 📚 API Overview
 
-The main functions currently available in `open_studentaid` are:
+- **browser_login(provider, debug=False)**  
+  Opens a real browser for login & MFA, then saves tokens under `~/.studentaid/`.
 
-- **`login(username, password, provider)`**  
-  Starts the login flow but does not complete MFA. Returns the next step in the flow.
+- **ensure_login(provider)**  
+  Loads cached tokens; refreshes if expired using the refresh token.
 
-- **`login_full(username, password, provider, debug=False)`**  
-  Complete login + MFA in one call.  
-  Returns an OAuth2 tokens dictionary that includes `access_token` and `refresh_token`.
+- **loan_summary(provider)**  
+  Retrieves borrower loan data. Returns `(total_balance, loan_count, raw_json)`.
 
-- **`loan_summary(tokens)`**  
-  Uses a valid access token to fetch a borrower’s loan summary.  
-  Returns details such as balances, loan counts, and groupings.
-
-- **`ensure_access_token(tokens)`**  
-  Utility that checks if the current access token is still valid.  
-  If expired, it will refresh using the refresh token.
+- **StudentAid class**  
+  Optional OOP wrapper: `StudentAid("nelnet").loan_summary()`.
 
 ---
 
-## 🔒 Security & Privacy
-- Credentials are never uploaded anywhere; they stay local.  
-- Tokens are cached locally in `~/.studentaid_tokens.json`.  
-- Only read-only scopes (`mma.api.read`) are requested.  
+## 🔒 Security
+- Credentials and tokens **never leave your device**
+- Tokens are cached safely under `~/.studentaid/tokens_<provider>.json`
+- Only read-only API scopes (`mma.api.read`) are used by default
 
+---
+
+## 🧩 Folder Layout
+- ├── init.py
+- ├── auth.py
+- ├── api.py
+- ├── config.py
+- └── sessions.py
 ---
 
 ## 🤝 Contributing

@@ -13,7 +13,6 @@ from bs4 import BeautifulSoup
 from .config import ProviderConfig, DEFAULT_PROVIDER, DEFAULT_CLIENT_ID
 from .sessions import load_tokens, save_tokens, access_token_valid
 
-
 # =========================
 # Exceptions
 # =========================
@@ -46,16 +45,156 @@ def _code_challenge_s256(verifier: str) -> str:
     return _b64url(digest)
 
 
+def _akamai_warmup(sess: requests.Session, debug: bool = False):
+    # 1) root splash – sets sitewide cookies (ak_bmsc / bm_sv)
+    root = "https://nelnet.studentaid.gov/"
+    r1 = sess.get(root, timeout=30)
+    if debug:
+        print(f"[DEBUG] warmup GET {root} -> {r1.status_code}; set-cookie? {bool(r1.headers.get('set-cookie'))}")
+
+    # 2) login landing – sets antiforgery cookie on .studentaid.gov when it wants to
+    warm = "https://nelnet.studentaid.gov/account/login"
+    r2 = sess.get(warm, timeout=30)
+    if debug:
+        print(f"[DEBUG] warmup GET {warm} -> {r2.status_code}; set-cookie? {bool(r2.headers.get('set-cookie'))}")
+
+    if debug:
+        print("[DEBUG] warmup cookies:", sorted({c.name for c in sess.cookies}))
+
+def _form_action_url(current_url: str, form_el) -> str:
+    action = (form_el.get("action") or "").strip()
+    return current_url if action == "" else urlparse.urljoin(current_url, action)
+
+def _hidden(soup: BeautifulSoup, name: str) -> str:
+    el = soup.find("input", {"name": name})
+    return el.get("value", "") if el else ""
+
+
+# --- Browser-assisted login helpers (Playwright headed browser) ---
+
+def _ensure_playwright_available():
+    try:
+        from playwright.sync_api import sync_playwright  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+import time as _time
+from playwright.sync_api import sync_playwright
+
+def browser_assisted_login(
+    *,
+    provider: str,
+    client_id: str = DEFAULT_CLIENT_ID,  # kept for signature parity; not used here
+    debug: bool = False,
+) -> Dict:
+    """
+    Open the site's normal login, let the human complete auth/MFA, then capture the
+    first successful OAuth token payload by watching the browser's network traffic
+    to {auth_base}/connect/token. Works even if the actual authorize host/params
+    change, because we do not craft that request ourselves.
+    """
+    cfg = ProviderConfig(provider=provider.strip().lower(), client_id=client_id)
+
+    token_payload: Dict | None = None
+
+    with sync_playwright() as pw:
+        # Prefer installed Chrome (less bot friction), else bundled Chromium.
+        try:
+            browser = pw.chromium.launch(channel="chrome", headless=False)
+        except Exception:
+            browser = pw.chromium.launch(headless=False)
+
+        # Use a fresh, non-persistent context (no prior cookies).
+        context = browser.new_context()
+        page = context.new_page()
+
+        # Listener: capture the first successful /connect/token JSON.
+        def _on_response(resp):
+            nonlocal token_payload
+            if token_payload is not None:
+                return
+            try:
+                url = resp.url
+                if not url.startswith(cfg.auth_base) or "/connect/token" not in url:
+                    return
+                if resp.status != 200:
+                    return
+                # Must be a token exchange; try to parse JSON
+                j = resp.json()
+                if isinstance(j, dict) and "access_token" in j:
+                    token_payload = j
+                    if debug:
+                        safe = {k: j.get(k) for k in ("token_type", "expires_in", "scope")}
+                        print(f"[DEBUG] Captured token payload from {url} -> {safe}")
+            except Exception:
+                pass
+
+        context.on("response", _on_response)
+
+        # Warm-up (Akamai + sets cookies). Best-effort only.
+        try:
+            page.goto(f"https://{cfg.provider}.studentaid.gov/", wait_until="domcontentloaded")
+        except Exception:
+            pass
+
+        # Send user to the normal login screen and let the site handle redirects.
+        login_url = f"https://{cfg.provider}.studentaid.gov/account/login"
+        if debug:
+            print(f"[DEBUG] Opening login: {login_url}")
+            print("[DEBUG] Complete sign-in + MFA in the browser window…")
+        page.goto(login_url, wait_until="domcontentloaded")
+
+        # Wait up to 3 minutes for any tab to receive /connect/token.
+        deadline = _time.time() + 180
+        while _time.time() < deadline and token_payload is None:
+            page.wait_for_timeout(300)
+
+        browser.close()
+
+    if not token_payload:
+        raise LoginFlowError("Login did not complete or no token was returned.")
+
+    # Persist & return.
+    save_tokens(cfg.provider, token_payload)
+    return token_payload
+
+
+def login_browser_assisted(
+    provider: str = DEFAULT_PROVIDER,
+    *,
+    client_id: str = DEFAULT_CLIENT_ID,
+    debug: bool = False,
+) -> Dict:
+    """
+    Open a real browser, let the user sign in + MFA, capture tokens from /connect/token.
+    """
+    return browser_assisted_login(provider=provider, client_id=client_id, debug=debug)
+
 def _std_headers(provider: str) -> Dict[str, str]:
-    # Keep these browser-like to avoid WAF heuristics
+    # Browser-like headers to satisfy WAF/Bot and ASP.NET antiforgery
     return {
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,*/*;q=0.7",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Upgrade-Insecure-Requests": "1",
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
         ),
+        # Critical: client hints + fetch metadata (Chrome sends these)
+        "sec-ch-ua": '"Chromium";v="140", "Not=A?Brand";v="24", "Google Chrome";v="140"',
+        "sec-ch-ua-mobile": "?0",
+        'sec-ch-ua-platform': '"Windows"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-site",
+        "Sec-Fetch-User": "?1",
+
+        # Navigation context toward auth
         "Referer": f"https://{provider}.studentaid.gov/",
-        "Origin": f"https://{provider}.studentaid.gov",
+        "Origin":  f"https://{provider}.studentaid.gov",
     }
 
 
@@ -229,6 +368,68 @@ def _mine_script_for_login_urls(sess: requests.Session, base_url: str, html: str
     dbg(f"mined login-ish urls: {urls[:5]}{' …' if len(urls)>5 else ''}")
     return urls
 
+_STD_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+)
+
+def _fetch_login_form_via_browser(login_url: str, *, debug: bool = False):
+    """
+    Headless Chromium pass to execute Akamai/BM + antiforgery JS and return:
+      - final HTML (which contains <form id="frmSubmit">)
+      - cookies to import into our requests.Session
+    Requires: playwright  (pip install playwright && python -m playwright install chromium)
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as e:
+        raise LoginFlowError(
+            "Browser fallback requested but Playwright is not available. "
+            "Install with: pip install playwright && python -m playwright install chromium"
+        ) from e
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        ctx = browser.new_context(
+            user_agent=_STD_UA,
+            java_script_enabled=True,
+            viewport={"width": 1280, "height": 900},
+        )
+        page = ctx.new_page()
+
+        # hit nelnet root + /account/login (same as our warmup)
+        page.goto("https://nelnet.studentaid.gov/", wait_until="networkidle")
+        page.goto("https://nelnet.studentaid.gov/account/login", wait_until="networkidle")
+
+        # now the actual auth login URL
+        page.goto(login_url, wait_until="networkidle")
+
+        html = page.content()
+        cookies = ctx.cookies()  # list of dicts
+        if debug:
+            print("[DEBUG] browser cookies:", sorted({c["name"] for c in cookies}))
+            print("[DEBUG] page url:", page.url)
+            print("[DEBUG] page html size:", len(html))
+
+        ctx.close()
+        browser.close()
+
+    return html, cookies
+
+def _import_browser_cookies(sess: requests.Session, cookies: list[dict]):
+    """Copy Playwright cookies into our requests session."""
+    for c in cookies:
+        # Only bring over studentaid.gov cookies
+        dom = c.get("domain") or ""
+        if not dom or not dom.endswith("studentaid.gov"):
+            continue
+        sess.cookies.set(
+            name=c["name"],
+            value=c.get("value", ""),
+            domain=dom,
+            path=c.get("path", "/"),
+        )
+
 
 def _find_login_form(
     sess: requests.Session,
@@ -238,8 +439,10 @@ def _find_login_form(
     debug: bool = False,
 ) -> Tuple[str, BeautifulSoup]:
     """
-    Returns (form_action_url, form_element). Handles iframe-hosted, nested iframes,
-    AND script-built SPA pages by mining script files for login endpoints.
+    Returns (form_action_url, form_element).
+    Handles iframe-hosted, nested iframes,
+    script-built SPA pages, handler probes,
+    and as last resort, a headless browser fetch.
     """
     def dbg(msg: str):
         if debug:
@@ -247,9 +450,12 @@ def _find_login_form(
 
     abs_login = _abs_url(auth_base, login_url)
 
+    # 0) Warmup (root + /account/login)
+    _akamai_warmup(sess, debug=debug)
+
     # 1) Try the main page
-    r = sess.get(abs_login, timeout=30)
-    dbg(f"GET {abs_login} -> {r.status_code}")
+    r = sess.get(abs_login, headers={"User-Agent": _STD_UA}, timeout=30)
+    dbg(f"GET {abs_login} -> {r.status_code}; len={len(r.text)}")
     if r.status_code != 200:
         raise LoginFlowError(f"GET login page failed: {r.status_code}")
 
@@ -264,7 +470,7 @@ def _find_login_form(
     iframe_urls = _extract_iframe_srcs(auth_base, r.url, r.text)
     dbg(f"Iframes on main page: {iframe_urls}")
     for iframe_url in iframe_urls:
-        ri = sess.get(iframe_url, timeout=30)
+        ri = sess.get(iframe_url, headers={"User-Agent": _STD_UA}, timeout=30)
         dbg(f"GET iframe {iframe_url} -> {ri.status_code}")
         if ri.status_code != 200:
             continue
@@ -275,11 +481,10 @@ def _find_login_form(
             dbg(f"Found form in iframe; action={action_if}")
             return _abs_url(auth_base, action_if), form_if
 
-        # nested iframes inside this iframe
         nested_urls = _extract_iframe_srcs(auth_base, ri.url, ri.text)
         dbg(f"Nested iframes in {iframe_url}: {nested_urls}")
         for nested in nested_urls:
-            rn = sess.get(nested, timeout=30)
+            rn = sess.get(nested, headers={"User-Agent": _STD_UA}, timeout=30)
             dbg(f"GET nested iframe {nested} -> {rn.status_code}")
             if rn.status_code != 200:
                 continue
@@ -290,9 +495,9 @@ def _find_login_form(
                 dbg(f"Found form in nested iframe; action={action_n}")
                 return _abs_url(auth_base, action_n), form_n
 
-    # 3) Fallbacks: direct Account/Login (without/with ReturnUrl)
+    # 3) Fallbacks: direct /Account/Login
     direct_login = f"{auth_base}/Account/Login"
-    rd = sess.get(direct_login, timeout=30)
+    rd = sess.get(direct_login, headers={"User-Agent": _STD_UA}, timeout=30)
     dbg(f"GET {direct_login} -> {rd.status_code}")
     if rd.status_code == 200:
         soup_d = BeautifulSoup(rd.text, "html.parser")
@@ -307,7 +512,7 @@ def _find_login_form(
     ret = (q.get("ReturnUrl") or [None])[0]
     if ret:
         rd2_url = f"{auth_base}/Account/Login?ReturnUrl={urlparse.quote(ret, safe='')}"
-        rd2 = sess.get(rd2_url, timeout=30)
+        rd2 = sess.get(rd2_url, headers={"User-Agent": _STD_UA}, timeout=30)
         dbg(f"GET {rd2_url} -> {rd2.status_code}")
         if rd2.status_code == 200:
             soup_d2 = BeautifulSoup(rd2.text, "html.parser")
@@ -317,11 +522,11 @@ def _find_login_form(
                 dbg(f"Found form on /Account/Login?ReturnUrl; action={action_d2}")
                 return _abs_url(auth_base, action_d2), form_d2
 
-    # 4) NEW: mine script files for login endpoints (SPA/JS-built)
+    # 4) Mine script files for login endpoints
     mined = _mine_script_for_login_urls(sess, auth_base, r.text, debug=debug)
     for candidate in mined:
         try:
-            rx = sess.get(candidate, timeout=30)
+            rx = sess.get(candidate, headers={"User-Agent": _STD_UA}, timeout=30)
             dbg(f"GET mined {candidate} -> {rx.status_code}")
             if rx.status_code != 200:
                 continue
@@ -334,11 +539,53 @@ def _find_login_form(
         except Exception as e:
             dbg(f"fetch mined error {candidate}: {e}")
 
+    # 5) Handler probes
+    for probe in [
+        f"{auth_base}/Account/Login?handler=SignIn",
+        f"{auth_base}/Account/Login?handler=Login",
+        f"{auth_base}/Account/SignInStart",
+        f"{auth_base}/Account/SignIn",
+        f"{auth_base}/Identity/Account/Login?handler=SignIn",
+        f"{auth_base}/Identity/Account/Login",
+        f"{auth_base}/Account/Login?handler=SignIn&ReturnUrl={urlparse.quote(ret, safe='') if ret else ''}",
+        f"{auth_base}/Identity/Account/Login?handler=SignIn&ReturnUrl={urlparse.quote(ret, safe='') if ret else ''}",
+    ]:
+        try:
+            rp = sess.get(probe, headers={"User-Agent": _STD_UA}, timeout=30)
+            dbg(f"GET probe {probe} -> {rp.status_code}; len={len(rp.text)}")
+            if rp.status_code == 200:
+                soup_p = BeautifulSoup(rp.text, "html.parser")
+                form_p = soup_p.find("form")
+                if form_p:
+                    action_p = form_p.get("action") or rp.url
+                    dbg(f"Found form from probe; action={action_p}")
+                    return _abs_url(auth_base, action_p), form_p
+        except Exception as e:
+            dbg(f"probe error {probe}: {e}")
+
+    # 6) FINAL fallback: headless browser
     if debug:
-        print("[DEBUG] No <form> found. First 1000 chars of main page:\n", r.text[:1000])
+        print("[DEBUG] Falling back to headless browser to fetch login form…")
 
-    raise LoginFlowError("Login page has no <form> element (after iframe, fallbacks, and script-mining)")
+    try:
+        html, pw_cookies = _fetch_login_form_via_browser(abs_login, debug=debug)
+        _import_browser_cookies(sess, pw_cookies)
 
+        soup_b = BeautifulSoup(html, "html.parser")
+        form_b = soup_b.find("form", id="frmSubmit") or soup_b.find("form")
+        if form_b:
+            action_b = form_b.get("action") or abs_login
+            if debug:
+                print(f"[DEBUG] Browser fallback found form; action={action_b}")
+            return _abs_url(auth_base, action_b), form_b
+    except Exception as e:
+        if debug:
+            print("[DEBUG] Browser fallback error:", repr(e))
+
+    raise LoginFlowError(
+        "Login page has no <form> element (after warmup, iframe, fallbacks, "
+        "script-mining, handler probes, and browser fallback)"
+    )
 
 def _detect_username_password_fields(form_el) -> Tuple[Optional[str], Optional[str]]:
     """
@@ -361,16 +608,24 @@ def _detect_username_password_fields(form_el) -> Tuple[Optional[str], Optional[s
     return username_field, password_field
 
 
-def _csrf_headers(provider: str, sess: requests.Session) -> Dict[str, str]:
+def _csrf_headers(provider: str, sess: requests.Session, form_token: str | None = None) -> Dict[str, str]:
     """
-    IdentityServer/ASP.NET often uses both a hidden field and a cookie for anti-forgery.
-    If a __RequestVerificationToken cookie exists, also send it as a header.
+    Build headers for form POSTs. If a hidden anti-forgery field value is known,
+    send it in the RequestVerificationToken header (ASP.NET Core expects this).
     """
     headers = dict(_std_headers(provider))
     headers["Content-Type"] = "application/x-www-form-urlencoded"
-    csrf_cookie = sess.cookies.get("__RequestVerificationToken")
-    if csrf_cookie:
-        headers.setdefault("RequestVerificationToken", csrf_cookie)
+
+    # Prefer the hidden field's token if we have it; otherwise fall back to cookie.
+    if form_token:
+        headers["RequestVerificationToken"] = form_token
+    else:
+        cookie_val = (
+            sess.cookies.get("__RequestVerificationToken")
+            or sess.cookies.get(".AspNetCore.Antiforgery")  # some deployments shorten the name
+        )
+        if cookie_val:
+            headers["RequestVerificationToken"] = cookie_val
     return headers
 
 
@@ -396,10 +651,8 @@ def build_authorize_url(cfg: ProviderConfig, code_challenge: str, state: str, no
 
 
 def start_authorization(sess: requests.Session, authorize_url: str) -> str:
-    """
-    Start OAuth: expect 302 to /Account/Login?ReturnUrl=...
-    Returns absolute login URL.
-    """
+    # make sure the next hop thinks we came from nelnet site
+    # (sess.headers already has Referer/Origin from _std_headers)
     r = sess.get(authorize_url, allow_redirects=False, timeout=30)
     if r.status_code not in (302, 303):
         raise LoginFlowError(f"Unexpected status from /connect/authorize: {r.status_code}")
@@ -414,46 +667,59 @@ def start_authorization(sess: requests.Session, authorize_url: str) -> str:
 # =========================
 def submit_login_form(
     sess: requests.Session,
-    cfg: ProviderConfig,
+    cfg,
     login_url: str,
     username: str,
     password: str,
     *,
     debug: bool = False,
-) -> str:
-    """
-    Fetch the login page (or its iframe), scrape inputs, fill creds, POST form.
-    Returns next redirect URL (absolute).
-    """
-    abs_login = _abs_url(cfg.auth_base, login_url)
-    action, form_el = _find_login_form(sess, cfg.auth_base, abs_login, debug=debug)
+):
+    # Find the actual login form (handles iframes, probes, etc.)
+    action, form_el = _find_login_form(sess, cfg.auth_base, login_url, debug=debug)
 
-    form_data = _collect_form_inputs(form_el)
+    # Collect *all* inputs exactly as presented
+    form = _collect_form_inputs(form_el)
 
-    user_field, pass_field = _detect_username_password_fields(form_el)
-    if not user_field or not pass_field:
-        if debug:
-            print("[DEBUG] Login inputs found:", sorted(form_data.keys()))
-        raise LoginFlowError("Could not detect username/password fields on login form")
+    # Detect the correct username/password field names
+    uname_name, pwd_name = _detect_username_password_fields(form_el)
+    if not uname_name or not pwd_name:
+        raise LoginFlowError("Could not detect username/password field names on login form.")
 
-    form_data[user_field] = username
-    form_data[pass_field] = password
-    if "RememberLogin" in form_data and not form_data["RememberLogin"]:
-        form_data["RememberLogin"] = "false"
+    # Overwrite with our credentials while preserving any other fields (ReturnUrl, tokens, etc.)
+    form[uname_name] = username
+    form[pwd_name]  = password
 
-    headers = _csrf_headers(cfg.provider, sess)
-    r = sess.post(action, data=form_data, headers=headers, allow_redirects=False, timeout=30)
-    if r.status_code not in (302, 303):
-        if debug:
-            print("[DEBUG] Login POST failed. Response (first 800 chars):\n", r.text[:800])
-            print("[DEBUG] Posted fields:", sorted(form_data.keys()))
-            print("[DEBUG] Posted to:", action)
-        raise LoginFlowError(f"POST login failed: {r.status_code}")
+    # Pull the anti-forgery hidden field value, if present, for the header
+    soup = BeautifulSoup(str(form_el), "html.parser")
+    hidden_anti = (
+        _hidden(soup, "__RequestVerificationToken")
+        or _hidden(soup, "RequestVerificationToken")
+        or form.get("__RequestVerificationToken")
+        or form.get("RequestVerificationToken")
+        or ""
+    )
 
-    nxt = r.headers.get("Location", "")
-    if not nxt:
-        raise LoginFlowError("No redirect after login")
-    return _abs_url(cfg.auth_base, nxt)
+    # Some sites require an explicit submit value; make sure one exists
+    form.setdefault("submitValue", "login")
+
+    headers = _csrf_headers(cfg.provider, sess, form_token=hidden_anti)
+    headers.update({
+        "Origin": f"https://{cfg.provider}.studentaid.gov",
+        "Referer": action,
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    })
+
+    rp = sess.post(action, data=form, headers=headers, allow_redirects=False, timeout=30)
+    if debug:
+        print(f"[DEBUG] submit_login_form: POST {action} -> {rp.status_code} Location={rp.headers.get('Location')}")
+
+    # A successful login will usually 302 to the MFA choice page
+    if rp.status_code in (302, 303) and rp.headers.get("Location"):
+        return urlparse.urljoin(action, rp.headers["Location"])
+
+    # If we were kept on the same page (200), treat that as a failure with body for debugging
+    raise LoginFlowError(f"Login POST failed: {rp.status_code} {rp.text[:400]}")
 
 
 def choose_mfa_method(
@@ -604,6 +870,7 @@ def exchange_code_for_tokens(
 ) -> Dict:
     """
     POST /connect/token with authorization_code + PKCE verifier.
+    Some deployments are strict about Origin/Referer and explicit scope.
     """
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -614,9 +881,10 @@ def exchange_code_for_tokens(
     data = {
         "grant_type": "authorization_code",
         "code": code,
-        "redirect_uri": redirect_uri,
+        "redirect_uri": redirect_uri,       # MUST exactly match the one used in /authorize
         "client_id": cfg.client_id,
-        "code_verifier": code_verifier,
+        "code_verifier": code_verifier,     # PKCE
+        "scope": "openid offline_access mma.api.read",  # harmless if ignored; fixes picky setups
     }
     tr = sess.post(cfg.token_url, headers=headers, data=data, timeout=30)
     if tr.status_code >= 400:
@@ -691,7 +959,7 @@ def login(provider: str = DEFAULT_PROVIDER, client_id: str = DEFAULT_CLIENT_ID) 
 
 
 # =========================
-# Orchestrator: Full Login (creds + MFA)
+# Full Login (creds + MFA)
 # =========================
 def login_full(
     provider: str,

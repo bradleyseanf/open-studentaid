@@ -1,7 +1,45 @@
+# Byte-compiled / cache files
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+
+# Virtual environments
 .venv/
+venv/
+env/
+ENV/
+
+# Environment and local settings
 .env
 .studentaid/
 .vscode/
-*.egg-info/*.egg-info/
+
+# Build / packaging artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+*.manifest
+*.spec
+
+# Test and temp files
+test.py
+tests/__pycache__/
+*.log
+*.tmp
+*.bak
+
+# PyInstaller / coverage / reports
+*.cover
+htmlcov/
+.coverage
+coverage.xml
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+
+# IDE / OS junk
+.idea/
+.DS_Store
+Thumbs.db
