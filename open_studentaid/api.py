@@ -1,6 +1,6 @@
 # api.py
 from __future__ import annotations
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, List
 import socket
 import requests
 
@@ -73,30 +73,22 @@ def _pick_api_base(cfg: ProviderConfig, sess: requests.Session, token: str, *, t
     return fallback
 
 
-def loan_summary(
+def _borrower_details(
     *,
     provider: str = DEFAULT_PROVIDER,
     client_id: str = DEFAULT_CLIENT_ID,
-) -> Tuple[float, int, Dict[str, Any]]:
+) -> Dict[str, Any]:
     """
-    Fetch borrower summary and return (total_balance, loan_count, raw_json).
-
-    - Ensures a valid access token (auto-refresh via refresh_token if needed)
-    - Dynamically discovers a reachable API base for the provider
-    - Computes total as: principal + current interest + capitalized + late fees
+    Fetch borrower details JSON from the servicer API.
     """
     cfg = ProviderConfig(provider=provider, client_id=client_id)
-
-    # Always obtain a fresh-enough access token via our helper (auto-refreshes if expired)
     access_token = ensure_access_token(provider=cfg.provider, client_id=cfg.client_id)
 
     sess = requests.Session()
     api_base = _pick_api_base(cfg, sess, access_token)
-
     url = api_base + cfg.borrower_details_path
     headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
 
-    # Do the request; if we get a 401 (race with expiry), refresh once and retry.
     r = sess.get(url, headers=headers, timeout=30)
     if r.status_code == 401:
         access_token = ensure_access_token(provider=cfg.provider, client_id=cfg.client_id)
@@ -104,8 +96,18 @@ def loan_summary(
         r = sess.get(url, headers=headers, timeout=30)
 
     r.raise_for_status()
-    data: Dict[str, Any] = r.json()
+    return r.json()
 
+
+def loan_summary(
+    *,
+    provider: str = DEFAULT_PROVIDER,
+    client_id: str = DEFAULT_CLIENT_ID,
+) -> Tuple[float, int, Dict[str, Any]]:
+    """
+    Fetch borrower summary and return (total_balance, loan_count, raw_json).
+    """
+    data = _borrower_details(provider=provider, client_id=client_id)
     loans = (data.get("borrowerInfo") or {}).get("edServicerLoans") or []
     loan_count = len(loans)
 
@@ -118,3 +120,38 @@ def loan_summary(
         total_balance += principal + curr_int + cap_int + late
 
     return total_balance, loan_count, data
+
+
+def loan_details(
+    *,
+    provider: str = DEFAULT_PROVIDER,
+    client_id: str = DEFAULT_CLIENT_ID,
+) -> List[Dict[str, Any]]:
+    """
+    Return a list of per-loan balances and identifiers.
+    """
+    data = _borrower_details(provider=provider, client_id=client_id)
+    loans = (data.get("borrowerInfo") or {}).get("edServicerLoans") or []
+
+    details: List[Dict[str, Any]] = []
+    for ln in loans:
+        principal = _money(ln.get("currentPrincipalBalance"))
+        curr_int = _money(ln.get("currentInterest"))
+        cap_int = _money(ln.get("capitalizedInterest"))
+        late = _money(ln.get("outstandingLateFees"))
+        total = principal + curr_int + cap_int + late
+
+        details.append(
+            {
+                "loanId": ln.get("loanId") or ln.get("loanAccountNumber") or ln.get("loanNumber"),
+                "loanType": ln.get("loanTypeDescription") or ln.get("loanType"),
+                "servicer": ln.get("servicerName") or ln.get("loanServicer"),
+                "principal": principal,
+                "interest": curr_int,
+                "capitalizedInterest": cap_int,
+                "lateFees": late,
+                "totalBalance": total,
+            }
+        )
+
+    return details

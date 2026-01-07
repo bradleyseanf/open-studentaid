@@ -1,97 +1,61 @@
-# 🏛️ Open StudentAid API Wrapper
+![Open StudentAid](assets/header.png)
 
-A Python library providing a clean interface for accessing loan and account data from StudentAid.gov servicers (e.g., **Nelnet**, **CRI**).  
-It’s designed to be **open, local, and secure** — you control your credentials and tokens, stored only on your machine.
+# Open StudentAid
 
----
+Open StudentAid is a local, headless Playwright login + API wrapper that pulls your Nelnet loan data and stores tokens on your machine.
 
-## ✨ Features
-- Interactive **browser login with MFA** (text/email codes)
-- **Automatic token caching** and refresh via local session store
-- Consistent API surface across servicers (`loan_summary()`, etc.)
-- Works with `.env` credentials or direct parameters
-- Read-only scopes by default for safety
+## What it does
+- Logs in to Nelnet with the real browser flow and MFA
+- Remembers the device using a persistent Playwright profile in `.osa/`
+- Fetches borrower loan details and totals from the servicer API
 
----
+## Quick start
 
-## 📦 Installation
+Install dependencies:
 
-Clone the repository and install dependencies:
-
-    git clone https://github.com/bradleyseanf/open-studentaid.git
-    cd open-studentaid
     python -m venv .venv
-    # Activate the environment
-    # Linux/Mac:
-    source .venv/bin/activate
-    # Windows PowerShell:
     .\.venv\Scripts\activate
-    pip install -U pip -r requirements.txt
+    pip install -U pip
+    pip install -e .
 
-### Optional: environment variables
+Create `.env` in the project root:
 
-Create a `.env` file in the root for convenience:
+    STUDENT_AID_PROVIDER=nelnet
+    STUDENT_AID_USERNAME=your_username
+    STUDENT_AID_PASSWORD=your_password
+    STUDENT_AID_MFA_METHOD=sms
 
-    STUDENT_AID_PROVIDER=nelnet   # or cri
-    CLIENT_ID=mma
+Run the test script:
 
----
+    python test.py
 
-## 🚀 Quick Start
+## Usage
 
-    from open_studentaid import browser_login, ensure_login, loan_summary
+```python
+from open_studentaid import login, loan_summary, loan_details
 
-    # 1️⃣ First-time login (opens real browser, completes MFA)
-    browser_login(provider="nelnet", debug=True)
+# First-time login (MFA required)
+login(
+    provider="nelnet",
+    username="your_username",
+    password="your_password",
+    mfa_method="sms",  # or "email"
+    remember_device=True,
+)
 
-    # 2️⃣ Auto-refresh and fetch your loan data
-    ensure_login(provider="nelnet")
-    total, count, raw = loan_summary(provider="nelnet")
+# Fetch totals
+total, count, raw = loan_summary(provider="nelnet")
+print(total, count)
 
-    print(f"You have {count} loans, total balance: ${total:,.2f}")
+# List per-loan balances
+for loan in loan_details(provider="nelnet"):
+    print(loan["loanId"], loan["totalBalance"])
+```
 
----
+## Notes
+- The first login requires an MFA code. After that, Nelnet should remember the device for 90 days.
+- Tokens are saved under `~/.studentaid/`. The Playwright browser profile is saved under `.osa/`.
+- The only API endpoint used today is borrower details, which includes all your loans and balances.
 
-## 📚 API Overview
-
-- **browser_login(provider, debug=False)**  
-  Opens a real browser for login & MFA, then saves tokens under `~/.studentaid/`.
-
-- **ensure_login(provider)**  
-  Loads cached tokens; refreshes if expired using the refresh token.
-
-- **loan_summary(provider)**  
-  Retrieves borrower loan data. Returns `(total_balance, loan_count, raw_json)`.
-
-- **StudentAid class**  
-  Optional OOP wrapper: `StudentAid("nelnet").loan_summary()`.
-
----
-
-## 🔒 Security
-- Credentials and tokens **never leave your device**
-- Tokens are cached safely under `~/.studentaid/tokens_<provider>.json`
-- Only read-only API scopes (`mma.api.read`) are used by default
-
----
-
-## 🧩 Folder Layout
-- ├── init.py
-- ├── auth.py
-- ├── api.py
-- ├── config.py
-- └── sessions.py
----
-
-## 🤝 Contributing
-Pull requests are welcome!  
-If you’d like to add support for additional servicers or endpoints:
-
-1. Fork the repo  
-2. Create a feature branch  
-3. Submit a PR  
-
----
-
-## 📄 License
-This project is licensed under the MIT License — see [LICENSE](LICENSE) for details.
+## License
+MIT (see `LICENSE`).
