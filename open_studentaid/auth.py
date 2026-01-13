@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import time
 from pathlib import Path
@@ -188,7 +189,11 @@ def login_playwright(
     with sync_playwright() as pw:
         storage_dir = None
         if remember_device:
-            storage_dir = Path.cwd() / ".osa" / cfg.provider
+            storage_root = os.getenv("OSA_STORAGE_DIR")
+            if storage_root:
+                storage_dir = Path(storage_root) / cfg.provider
+            else:
+                storage_dir = Path.cwd() / ".osa" / cfg.provider
             storage_dir.mkdir(parents=True, exist_ok=True)
 
         if storage_dir:
