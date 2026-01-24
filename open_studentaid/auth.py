@@ -71,6 +71,32 @@ def _click_force(page, selector: str) -> bool:
         return False
 
 
+def _accept_cookies(page) -> None:
+    """
+    Best-effort acceptance of the consent manager/cookie banner.
+    """
+    try:
+        mgr = page.locator("#transcend-consent-manager").first
+        if mgr.count() > 0:
+            try:
+                mgr.click(timeout=1500)
+            except Exception:
+                _click_force(page, "#transcend-consent-manager")
+            # Some flows require a second click to surface the modal controls.
+            try:
+                mgr.click(timeout=1500)
+            except Exception:
+                _click_force(page, "#transcend-consent-manager")
+    except Exception:
+        pass
+
+    # Try common consent-manager buttons.
+    _click_if_present(page, "button:has-text('Continue')", timeout_ms=2500)
+    _click_if_present(page, "button:has-text('Accept')", timeout_ms=2500)
+    _click_if_present(page, "button:has-text('Accept All')", timeout_ms=2500)
+    _click_if_present(page, "button[aria-label*='accept' i]", timeout_ms=2500)
+
+
 def _fill_first(page, selectors: list[str], value: str) -> bool:
     for sel in selectors:
         try:
@@ -81,6 +107,63 @@ def _fill_first(page, selectors: list[str], value: str) -> bool:
         except Exception:
             continue
     return False
+
+
+def _fill_by_label(page, label: str, value: str) -> bool:
+    try:
+        field = page.get_by_label(re.compile(label, re.I))
+        if field.count() > 0:
+            try:
+                field.click(timeout=1500)
+            except Exception:
+                pass
+            field.fill(value, timeout=3000)
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def _set_input_value(page, selector: str, value: str) -> bool:
+    try:
+        return bool(
+            page.evaluate(
+                """([sel, val]) => {
+                    const el = document.querySelector(sel);
+                    if (!el) return false;
+                    el.focus();
+                    el.value = val;
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    return true;
+                }""",
+                [selector, value],
+            )
+        )
+    except Exception:
+        return False
+
+
+def _select_mfa_choice(page, mfa_method: str, *, timeout_ms: int = 20000) -> bool:
+    choice_map = {"sms": "3", "email": "2"}
+    choice_val = choice_map.get(mfa_method.lower())
+    if not choice_val:
+        return False
+
+    if _wait_for_any_selector(page, ["input[name='AuthChoice']"], timeout_ms=timeout_ms):
+        try:
+            page.locator(f"input[name='AuthChoice'][value='{choice_val}']").check(timeout=5000)
+            return True
+        except Exception:
+            pass
+
+    # Fallback: click the visible card/row with the expected text.
+    text_hint = "Text to" if mfa_method.lower() == "sms" else "Email to"
+    try:
+        page.locator("div").filter(has_text=re.compile(text_hint, re.I)).first.click(timeout=5000)
+        return True
+    except Exception:
+        return False
 
 
 def _dump_debug_artifacts(page, *, label: str) -> Optional[Path]:
@@ -232,6 +315,7 @@ def login_playwright(
         page.goto(login_url, wait_until="domcontentloaded")
 
         _wait_for_any_selector(page, ["app-root", "body"], timeout_ms=10000)
+        _accept_cookies(page)
 
         if "welcome" in page.url.lower():
             _click_if_present(page, "button:has-text('Log In')", timeout_ms=8000)
@@ -242,6 +326,7 @@ def login_playwright(
 
         # Select "Access Your Student Loan Account" and continue.
         if "account/login" in page.url.lower():
+            _accept_cookies(page)
             if _wait_visible(page, "label[for='borrower']", timeout_ms=15000):
                 try:
                     page.locator("label[for='borrower']").click(timeout=3000)
@@ -271,6 +356,7 @@ def login_playwright(
             _click_if_present(page, "button:has-text('Accept')", timeout_ms=8000)
             _click_if_present(page, "button[aria-label*='accept federal usage disclaimer' i]", timeout_ms=8000)
             _click_force(page, "#accept-disclaimer")
+            _accept_cookies(page)
 
             try:
                 page.wait_for_url(re.compile(r"/Account/Login", re.I), timeout=20000)
@@ -303,7 +389,27 @@ def login_playwright(
             ],
             username,
         )
-        _fill_first(page, ["input[type='password']"], password)
+        pw_filled = _fill_first(page, ["input[type='password']"], password)
+        if not pw_filled:
+            pw_filled = _fill_by_label(page, "password", password)
+        if not pw_filled:
+            try:
+                page.get_by_role("textbox", name=re.compile(r"password", re.I)).fill(password, timeout=3000)
+                pw_filled = True
+            except Exception:
+                pw_filled = False
+        if not pw_filled:
+            _fill_first(
+                page,
+                [
+                    "input[aria-label*='password' i]",
+                    "input[name*='pass' i]",
+                    "input[id*='pass' i]",
+                    "input[placeholder*='password' i]",
+                ],
+                password,
+            )
+            _set_input_value(page, "input[type='password']", password)
 
         if save_username:
             try:
@@ -323,11 +429,13 @@ def login_playwright(
         try:
             has_choice = _wait_for_any_selector(page, ["input[name='AuthChoice']"], timeout_ms=20000)
             if has_choice:
-                page.locator(f"input[name='AuthChoice'][value='{choice_val}']").check(timeout=5000)
+                _select_mfa_choice(page, mfa_method, timeout_ms=20000)
                 try:
                     page.get_by_role("button", name=re.compile(r"send code", re.I)).click(timeout=5000)
                 except Exception:
                     _click_if_present(page, "button:has-text('Send')", timeout_ms=5000)
+            else:
+                _select_mfa_choice(page, mfa_method, timeout_ms=5000)
         except Exception:
             pass
 
