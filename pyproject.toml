@@ -11,10 +11,10 @@ readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
 dependencies = [
-    "requests",
-    "python-dotenv",
-    "beautifulsoup4",
-    "playwright",
+    "requests==2.34.2",
+    "python-dotenv==1.2.2",
+    "beautifulsoup4==4.15.0",
+    "playwright==1.61.0",
 ]
 keywords = ["studentaid", "loan", "api", "nelnet", "usde", "education", "oauth2"]
 classifiers = [
@@ -32,6 +32,9 @@ classifiers = [
 Homepage = "https://github.com/bradleyseanf/open-studentaid"
 Source = "https://github.com/bradleyseanf/open-studentaid"
 Issues = "https://github.com/bradleyseanf/open-studentaid/issues"
+
+[project.scripts]
+studentaid = "open_studentaid.openstudentaid:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

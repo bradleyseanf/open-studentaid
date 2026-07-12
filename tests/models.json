@@ -1,0 +1,21 @@
+{
+  "borrowerInfo": {
+    "edServicerLoans": [
+      {
+        "loanId": "E1001",
+        "loanTypeDescription": "Direct Unsubsidized Loan",
+        "currentPrincipalBalance": "$1,000.00",
+        "currentInterest": "12.50",
+        "capitalizedInterest": "3.00",
+        "outstandingLateFees": "0.00"
+      },
+      {
+        "loanId": "E1002",
+        "loanTypeDescription": "Direct Subsidized Loan",
+        "totalCurrentBalance": "$2,012.50",
+        "currentPrincipalBalance": "$1,999.00",
+        "currentInterest": "$10.00"
+      }
+    ]
+  }
+}
