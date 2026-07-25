@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "open-studentaid"
-version = "0.1.0"
-description = "Open-source Python wrapper for StudentAid.gov servicer APIs"
+version = "0.2.0"
+description = "One Python API for Nelnet and Edfinancial student-loan data"
 authors = [{ name = "Bradley Florence", email = "bradleyseanf@users.noreply.github.com" }]
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
     "requests==2.34.2",
@@ -16,11 +16,10 @@ dependencies = [
     "beautifulsoup4==4.15.0",
     "playwright==1.61.0",
 ]
-keywords = ["studentaid", "loan", "api", "nelnet", "usde", "education", "oauth2"]
+keywords = ["studentaid", "loan", "api", "nelnet", "edfinancial", "education", "oauth2"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",

@@ -21,6 +21,17 @@ from .config import (
     session_state_path,
     write_session_state,
 )
+from .edfinancial.auth import (
+    account_summary_present as _edfinancial_account_summary_present,
+    fill_identity_verification as _fill_identity_verification,
+    identity_verification_present as _identity_verification_present,
+    login_url as _edfinancial_login_url,
+    normalize_date_of_birth as _normalize_date_of_birth,
+    normalize_social_security_number as _normalize_social_security_number,
+)
+from .exceptions import LoginFlowError, RefreshFailedError, TokenMissingError
+from .nelnet.auth import login_url as _nelnet_login_url
+from .nelnet.auth import validate_username as _validate_nelnet_username
 
 
 load_dotenv()
@@ -49,18 +60,6 @@ class ProviderConfig:
     @property
     def borrower_details_path(self) -> str:
         return "/api/1/borrower/details"
-
-
-class TokenMissingError(RuntimeError):
-    """Raised when an API call needs a token but no saved token is available."""
-
-
-class RefreshFailedError(RuntimeError):
-    """Raised when the cached refresh token cannot be exchanged."""
-
-
-class LoginFlowError(RuntimeError):
-    """Raised when the interactive Playwright login cannot reach an authenticated state."""
 
 
 _DEFAULT_TIMEOUT_SECONDS = 180
@@ -256,6 +255,7 @@ def _accept_federal_notice(page, tracer: _FlowTracer) -> bool:
         page,
         [
             "#accept-disclaimer",
+            "#Accept",
             "button[aria-label*='accept federal usage disclaimer' i]",
         ],
     )
@@ -640,10 +640,12 @@ def login_playwright(
     background: bool = False,
     get_code: Optional[Callable[[str], str]] = None,
     mfa_code: Optional[str] = None,
+    date_of_birth: Optional[str] = None,
+    social_security_number: Optional[str] = None,
     debug: bool = False,
     timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
 ) -> Dict[str, Any]:
-    """Log in through the real Nelnet browser flow and save the OAuth token payload.
+    """Log in through the selected servicer's browser flow and save the session.
 
     Always use a headed real Chrome session because the current Nelnet edge layer rejects
     automated browser modes. MFA can be supplied interactively, with ``get_code``, or
@@ -651,12 +653,9 @@ def login_playwright(
     """
     provider = provider.strip().lower()
     if not username.strip() or not password:
-        raise LoginFlowError("A Nelnet username and password are required.")
+        raise LoginFlowError("A StudentAid username and password are required.")
     if provider == "nelnet" and "@" in username:
-        raise LoginFlowError(
-            "Nelnet requires the account username, not an email address. "
-            "No login request was sent."
-        )
+        _validate_nelnet_username(username)
     if save_session is None:
         save_session = remember_device if remember_device is not None else True
     if trusted_device is None:
@@ -676,10 +675,26 @@ def login_playwright(
         raise LoginFlowError("mfa_method must be 'sms', 'email', or 'authenticator'")
 
     cfg = ProviderConfig(provider=provider, client_id=client_id)
+    resolved_date_of_birth = date_of_birth or _env_first(
+        "STUDENT_AID_DOB", "STUDENT_AID_DATE_OF_BIRTH", "DATE_OF_BIRTH", "DOB"
+    )
+    resolved_social_security_number = social_security_number or _env_first(
+        "STUDENT_AID_SSN", "SOCIAL_SECURITY_NUMBER", "SSN"
+    )
     sync_playwright = _require_playwright()
     tracer = _FlowTracer(
         enabled=debug,
-        secrets=[username, password, mfa_code or _env_first("STUDENT_AID_MFA_CODE", "MFA_CODE", "mfa_code") or ""],
+        secrets=[
+            username,
+            password,
+            mfa_code
+            or _env_first("STUDENT_AID_MFA_CODE", "MFA_CODE", "mfa_code")
+            or "",
+            resolved_date_of_birth or "",
+            re.sub(r"\D+", "", resolved_date_of_birth or ""),
+            resolved_social_security_number or "",
+            re.sub(r"\D+", "", resolved_social_security_number or ""),
+        ],
     )
     token_payload: Optional[Dict[str, Any]] = None
     context = None
@@ -721,7 +736,7 @@ def login_playwright(
                 context, browser = _browser_context(
                     pw,
                     storage_dir,
-                    storage_state_path,
+                    None if cfg.provider == "edfinancial" else storage_state_path,
                     background=background,
                     viewport={"width": 1440, "height": 1000},
                 )
@@ -743,8 +758,13 @@ def login_playwright(
                     page = context.new_page()
                 if debug:
                     print(f"[DEBUG] Opening {cfg.provider} login in headed Chrome")
+                login_url = (
+                    _edfinancial_login_url()
+                    if cfg.provider == "edfinancial"
+                    else _nelnet_login_url(cfg.provider)
+                )
                 page.goto(
-                    f"https://{cfg.provider}.studentaid.gov/account/login",
+                    login_url,
                     wait_until="domcontentloaded",
                     timeout=60_000,
                 )
@@ -763,10 +783,64 @@ def login_playwright(
                 deadline = time.monotonic() + max(30, timeout_seconds)
                 choice_submitted = False
                 code_submitted = False
+                identity_submitted_at = None
                 while time.monotonic() < deadline and token_payload is None:
                     page = _active_page(context, page)
                     previous_url = last_url
                     last_url = page.url
+
+                    if (
+                        cfg.provider == "edfinancial"
+                        and _edfinancial_account_summary_present(page)
+                    ):
+                        token_payload = {
+                            "access_token": "browser-session",
+                            "token_type": "Browser",
+                            "expires_in": 86_400,
+                        }
+                        tracer.capture(page, "authenticated_account_summary")
+                        break
+
+                    if _identity_verification_present(page):
+                        if identity_submitted_at is not None:
+                            if time.monotonic() - identity_submitted_at < 5:
+                                page.wait_for_timeout(300)
+                                continue
+                            error = _login_error(page)
+                            if error:
+                                tracer.capture(page, "login_error", note=error)
+                                raise LoginFlowError(error)
+                            raise LoginFlowError(
+                                "Edfinancial identity verification did not complete. "
+                                "Check STUDENT_AID_DOB and STUDENT_AID_SSN, then retry."
+                            )
+                        if not resolved_date_of_birth or not resolved_social_security_number:
+                            raise LoginFlowError(
+                                "Edfinancial does not recognize this device and requires "
+                                "STUDENT_AID_DOB plus STUDENT_AID_SSN in the environment."
+                            )
+                        tracer.capture(page, "identity_verification_ready")
+                        _fill_identity_verification(
+                            page,
+                            resolved_date_of_birth,
+                            resolved_social_security_number,
+                        )
+                        if not _click_button(
+                            page,
+                            [r"continue", r"verify", r"submit", r"next"],
+                            timeout_ms=10_000,
+                        ):
+                            raise LoginFlowError(
+                                "Edfinancial's identity-verification submit button changed; "
+                                f"current URL: {page.url}"
+                            )
+                        identity_submitted_at = time.monotonic()
+                        tracer.capture(
+                            page, "identity_verification_submitted", screenshot=False
+                        )
+                        page.wait_for_timeout(500)
+                        continue
+
                     error = _login_error(page)
                     if error:
                         tracer.capture(page, "login_error", note=error)
@@ -812,8 +886,13 @@ def login_playwright(
                     LAST_SESSION_STATES[cfg.provider] = state
                     if save_session and storage_state_path is not None:
                         write_session_state(storage_state_path, state)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    if debug:
+                        print(f"[DEBUG] Could not save browser state: {exc}")
+                    if cfg.provider == "edfinancial":
+                        raise LoginFlowError(
+                            f"Could not save the Edfinancial browser session: {exc}"
+                        ) from exc
     except LoginFlowError as exc:
         if tracer.directory and "Debug artifacts:" not in str(exc):
             raise LoginFlowError(f"{exc} Debug artifacts: {tracer.directory}") from exc
@@ -837,7 +916,8 @@ def login_playwright(
 
     if not token_payload:
         raise LoginFlowError("Login completed without an OAuth access token.")
-    save_tokens(cfg.provider, token_payload)
+    if cfg.provider != "edfinancial":
+        save_tokens(cfg.provider, token_payload)
     return token_payload
 
 
@@ -886,6 +966,12 @@ def refresh_tokens(cfg: ProviderConfig, refresh_token: str) -> Dict[str, Any]:
 def ensure_access_token(provider: str = DEFAULT_PROVIDER, client_id: str = DEFAULT_CLIENT_ID) -> str:
     """Return a valid cached token, refreshing it when possible."""
     cfg = ProviderConfig(provider=provider.strip().lower(), client_id=client_id)
+    if cfg.provider == "edfinancial":
+        if session_state_path(cfg.provider).exists():
+            return "browser-session"
+        raise TokenMissingError(
+            "No saved Edfinancial browser session was found. Run login() once."
+        )
     tokens = load_tokens(cfg.provider)
     if not tokens:
         raise TokenMissingError(
@@ -941,23 +1027,27 @@ def login_full(
     background: bool = False,
     get_code: Optional[Callable[[str], str]] = None,
     mfa_code: Optional[str] = None,
+    date_of_birth: Optional[str] = None,
+    social_security_number: Optional[str] = None,
     debug: bool = False,
     timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
 ) -> Dict[str, Any]:
     """Resolve explicit/env/terminal credentials and run the Playwright login."""
+    provider = provider.strip().lower()
+    provider_prefix = "EDFINANCIAL" if provider == "edfinancial" else "NELNET"
     resolved_username = _resolve_credential(
         username,
         "STUDENT_AID_USERNAME",
-        "Nelnet username: ",
+        f"{provider.title()} username: ",
         secret=False,
-        aliases=("NELNET_USERNAME", "USERNAME", "username"),
+        aliases=(f"{provider_prefix}_USERNAME", "USERNAME", "username"),
     )
     resolved_password = _resolve_credential(
         password,
         "STUDENT_AID_PASSWORD",
-        "Nelnet password: ",
+        f"{provider.title()} password: ",
         secret=True,
-        aliases=("NELNET_PASSWORD", "PASSWORD", "password"),
+        aliases=(f"{provider_prefix}_PASSWORD", "PASSWORD", "password"),
     )
     resolved_method = mfa_method or _env_first(
         "STUDENT_AID_MFA_METHOD", "MFA_METHOD", "mfa_method"
@@ -979,6 +1069,8 @@ def login_full(
         background=background,
         get_code=get_code,
         mfa_code=mfa_code,
+        date_of_birth=date_of_birth,
+        social_security_number=social_security_number,
         debug=debug,
         timeout_seconds=timeout_seconds,
     )
@@ -1002,11 +1094,15 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     from .api import loan_details, loan_snapshot
 
-    parser = argparse.ArgumentParser(prog="studentaid", description="Read your Nelnet student-loan data")
+    parser = argparse.ArgumentParser(
+        prog="studentaid", description="Read supported StudentAid servicer data"
+    )
     parser.add_argument("--provider", default=DEFAULT_PROVIDER)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    login_parser = subparsers.add_parser("login", help="Complete Nelnet login and MFA")
+    login_parser = subparsers.add_parser(
+        "login", help="Complete servicer login and identity verification"
+    )
     login_parser.add_argument("--username")
     login_parser.add_argument("--mfa-method", choices=["sms", "email", "authenticator"], default=None)
     login_parser.add_argument("--background", action="store_true")

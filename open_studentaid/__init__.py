@@ -34,6 +34,8 @@ def login(
     background: bool = False,
     get_code: Optional[Callable[[str], str]] = None,
     mfa_code: Optional[str] = None,
+    date_of_birth: Optional[str] = None,
+    social_security_number: Optional[str] = None,
     debug: bool = False,
     timeout_seconds: int = 180,
 ) -> Dict[str, Any]:
@@ -57,6 +59,8 @@ def login(
         background=background,
         get_code=get_code,
         mfa_code=mfa_code,
+        date_of_birth=date_of_birth,
+        social_security_number=social_security_number,
         debug=debug,
         timeout_seconds=timeout_seconds,
     )
@@ -110,7 +114,7 @@ def get_data(
     provider: str = DEFAULT_PROVIDER,
     client_id: str = DEFAULT_CLIENT_ID,
 ) -> Dict[str, Any]:
-    """Return the raw borrower-details payload from Nelnet."""
+    """Return the selected provider's raw borrower data."""
     _, _, raw = _loan_summary(provider=provider, client_id=client_id)
     return raw
 
@@ -154,6 +158,8 @@ class StudentAid:
         background: bool = False,
         get_code: Optional[Callable[[str], str]] = None,
         mfa_code: Optional[str] = None,
+        date_of_birth: Optional[str] = None,
+        social_security_number: Optional[str] = None,
         debug: bool = False,
         timeout_seconds: int = 180,
     ) -> Dict[str, Any]:
@@ -171,6 +177,8 @@ class StudentAid:
             background=background,
             get_code=get_code,
             mfa_code=mfa_code,
+            date_of_birth=date_of_birth,
+            social_security_number=social_security_number,
             debug=debug,
             timeout_seconds=timeout_seconds,
         )

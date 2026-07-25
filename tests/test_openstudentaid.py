@@ -8,9 +8,19 @@ from pathlib import Path
 from unittest.mock import patch
 
 import open_studentaid
-from open_studentaid.api import _loan_list, _loan_total, _money
+from open_studentaid.api import (
+    _loan_list,
+    _loan_total,
+    _money,
+    loan_details,
+    loan_snapshot,
+    loan_summary,
+)
+from open_studentaid.edfinancial.api import parse_account_summary
 from open_studentaid.openstudentaid import (
     _method_pattern,
+    _normalize_date_of_birth,
+    _normalize_social_security_number,
     _redact,
     _resolve_mfa_code,
     save_session as save_core_session,
@@ -48,6 +58,67 @@ class OpenStudentAidTests(unittest.TestCase):
         )
         with patch.dict(os.environ, {"STUDENT_AID_MFA_CODE": "999999"}):
             self.assertEqual(_resolve_mfa_code(get_code=None, mfa_code="123456"), "123456")
+
+    def test_identity_value_normalization(self):
+        self.assertEqual(_normalize_date_of_birth("12/18/2003"), ("12", "18", "2003"))
+        self.assertEqual(
+            _normalize_social_security_number("123-45-6789"),
+            ("123", "45", "6789"),
+        )
+
+    def test_edfinancial_account_summary_parser(self):
+        html = Path(__file__).with_name("edfinancial_summary.html").read_text()
+        data = parse_account_summary(
+            html,
+            "Total Current Balance: $5,500.25\nTotal Number of Loans: 2",
+        )
+
+        self.assertEqual(data["totalCurrentBalance"], 5500.25)
+        self.assertEqual(data["totalNumberOfLoans"], 2)
+        self.assertEqual(data["loans"][0]["loanId"], "101")
+        self.assertEqual(data["loans"][0]["currentBalance"], 1000.25)
+        self.assertEqual(data["loans"][1]["interestRate"], 5.5)
+
+    def test_public_calls_dispatch_to_edfinancial(self):
+        raw = {
+            "provider": "edfinancial",
+            "totalCurrentBalance": 5500.25,
+            "totalNumberOfLoans": 2,
+            "loans": [
+                {
+                    "loanId": "101",
+                    "loanTypeDescription": "Direct Loan - Unsubsidized",
+                    "servicerName": "Edfinancial",
+                    "status": "In Grace",
+                    "interestRate": 4.99,
+                    "currentBalance": 5500.25,
+                }
+            ],
+        }
+        with patch(
+            "open_studentaid.api._edfinancial_borrower_details", return_value=raw
+        ):
+            total, count, returned = loan_summary(provider="edfinancial")
+            details = loan_details(provider="edfinancial")
+            snapshot = loan_snapshot(provider="edfinancial")
+
+        self.assertEqual((total, count), (5500.25, 2))
+        self.assertIs(returned, raw)
+        self.assertEqual(details[0]["servicer"], "Edfinancial")
+        self.assertEqual(details[0]["totalBalance"], 5500.25)
+        self.assertEqual(snapshot["loanCount"], 2)
+
+    def test_public_calls_dispatch_to_nelnet(self):
+        with patch("open_studentaid.api._nelnet_borrower_details", return_value=MODELS):
+            total, count, returned = loan_summary(provider="nelnet")
+
+        self.assertEqual(total, 3028.0)
+        self.assertEqual(count, 2)
+        self.assertIs(returned, MODELS)
+
+    def test_unknown_provider_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Unsupported provider"):
+            loan_summary(provider="unknown")
 
     def test_session_state_is_secure_and_public_summary_is_exposed(self):
         with tempfile.TemporaryDirectory() as directory:
