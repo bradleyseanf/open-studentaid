@@ -16,13 +16,19 @@ from open_studentaid.api import (
     loan_snapshot,
     loan_summary,
 )
-from open_studentaid.edfinancial.api import parse_account_summary
+from open_studentaid.edfinancial.api import (
+    _persist_browser_session,
+    parse_account_summary,
+)
+from open_studentaid.edfinancial.auth import clear_stale_session_cookies
+from open_studentaid.exceptions import LoginFlowError
 from open_studentaid.openstudentaid import (
     _method_pattern,
     _normalize_date_of_birth,
     _normalize_social_security_number,
     _redact,
     _resolve_mfa_code,
+    _select_mfa_method,
     save_session as save_core_session,
 )
 from open_studentaid.config import LAST_SESSION_STATES
@@ -44,6 +50,19 @@ class OpenStudentAidTests(unittest.TestCase):
         self.assertRegex("Text message to ending in 12", _method_pattern("sms"))
         self.assertRegex("Email code to a***@example.com", _method_pattern("email"))
         self.assertRegex("Authenticator app", _method_pattern("authenticator"))
+
+    def test_mfa_error_names_selected_provider(self):
+        class EmptyPage:
+            def locator(self, selector):
+                raise RuntimeError(selector)
+
+        with self.assertRaisesRegex(
+            LoginFlowError,
+            "Edfinancial did not show an MFA option",
+        ):
+            _select_mfa_method(
+                EmptyPage(), "sms", provider="edfinancial"
+            )
 
     def test_sensitive_debug_values_are_redacted(self):
         self.assertEqual(
@@ -78,6 +97,67 @@ class OpenStudentAidTests(unittest.TestCase):
         self.assertEqual(data["loans"][0]["loanId"], "101")
         self.assertEqual(data["loans"][0]["currentBalance"], 1000.25)
         self.assertEqual(data["loans"][1]["interestRate"], 5.5)
+
+    def test_edfinancial_rotated_session_is_persisted(self):
+        refreshed_state = {
+            "cookies": [{"name": "rotated", "value": "new"}],
+            "origins": [],
+        }
+
+        class Context:
+            def storage_state(self):
+                return refreshed_state
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "edfinancial" / "storage_state.json"
+            _persist_browser_session(Context(), path)
+
+            self.assertEqual(json.loads(path.read_text()), refreshed_state)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_edfinancial_login_clears_only_transient_servicer_cookies(self):
+        class Context:
+            def __init__(self):
+                self.cleared = []
+
+            def cookies(self):
+                return [
+                    {
+                        "name": "JSESSIONID",
+                        "domain": "authenticate2.edfinancial.studentaid.gov",
+                        "path": "/CALM2EDF",
+                        "expires": -1,
+                    },
+                    {
+                        "name": "remembered-device",
+                        "domain": "authenticate2.edfinancial.studentaid.gov",
+                        "path": "/",
+                        "expires": 2_000_000_000,
+                    },
+                    {
+                        "name": "unrelated-session",
+                        "domain": "example.com",
+                        "path": "/",
+                        "expires": -1,
+                    },
+                ]
+
+            def clear_cookies(self, **kwargs):
+                self.cleared.append(kwargs)
+
+        context = Context()
+        clear_stale_session_cookies(context)
+
+        self.assertEqual(
+            context.cleared,
+            [
+                {
+                    "name": "JSESSIONID",
+                    "domain": "authenticate2.edfinancial.studentaid.gov",
+                    "path": "/CALM2EDF",
+                }
+            ],
+        )
 
     def test_public_calls_dispatch_to_edfinancial(self):
         raw = {

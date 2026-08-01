@@ -73,6 +73,33 @@ def account_summary_present(page) -> bool:
     )
 
 
+def clear_stale_session_cookies(context) -> None:
+    """Drop only transient Edfinancial cookies before a fresh credential login.
+
+    Chrome restores session cookies in persistent profiles. Edfinancial invalidates
+    those server-side after logout/timeout, so replaying them on the next login can
+    divert the flow to an unrelated verification page. Long-lived device cookies are
+    deliberately retained.
+    """
+    try:
+        cookies = context.cookies()
+        for cookie in cookies:
+            domain = str(cookie.get("domain", "")).lstrip(".").lower()
+            if not domain.endswith("edfinancial.studentaid.gov"):
+                continue
+            if float(cookie.get("expires", -1)) >= 0:
+                continue
+            context.clear_cookies(
+                name=cookie.get("name"),
+                domain=cookie.get("domain"),
+                path=cookie.get("path"),
+            )
+    except Exception as exc:
+        raise LoginFlowError(
+            "Edfinancial's stale browser session could not be cleared before login."
+        ) from exc
+
+
 def _visible_unique_inputs(page, selectors: list[str]):
     found = []
     seen = set()

@@ -23,6 +23,7 @@ from .config import (
 )
 from .edfinancial.auth import (
     account_summary_present as _edfinancial_account_summary_present,
+    clear_stale_session_cookies as _clear_edfinancial_session_cookies,
     fill_identity_verification as _fill_identity_verification,
     identity_verification_present as _identity_verification_present,
     login_url as _edfinancial_login_url,
@@ -63,6 +64,11 @@ class ProviderConfig:
 
 
 _DEFAULT_TIMEOUT_SECONDS = 180
+
+
+def _provider_label(provider: str) -> str:
+    normalized = provider.strip().lower()
+    return "Edfinancial" if normalized == "edfinancial" else normalized.title()
 
 
 def save_session(provider: str = DEFAULT_PROVIDER) -> Path:
@@ -304,14 +310,21 @@ def _login_error(page) -> str:
     return ""
 
 
-def _open_login_and_terms(page, tracer: _FlowTracer, *, timeout_ms: int = 45_000) -> None:
+def _open_login_and_terms(
+    page,
+    tracer: _FlowTracer,
+    *,
+    provider: str = "nelnet",
+    timeout_ms: int = 45_000,
+) -> None:
     """Navigate the public site, agreement page, and OAuth login page."""
     deadline = time.monotonic() + timeout_ms / 1_000
     last_url = ""
     while time.monotonic() < deadline:
         if _is_blocked(page):
             raise LoginFlowError(
-                "Nelnet returned HTTP 403 Access Denied. Nelnet's edge protection rejects "
+                f"{_provider_label(provider)} returned HTTP 403 Access Denied. "
+                f"{_provider_label(provider)}'s edge protection rejects "
                 "automated browser modes; use the normal headed Chrome session and do not "
                 "override the browser User-Agent."
             )
@@ -345,7 +358,14 @@ def _open_login_and_terms(page, tracer: _FlowTracer, *, timeout_ms: int = 45_000
     raise LoginFlowError(f"The login form did not load; current URL: {page.url}")
 
 
-def _fill_credentials(page, username: str, password: str, *, save_username: bool) -> None:
+def _fill_credentials(
+    page,
+    username: str,
+    password: str,
+    *,
+    save_username: bool,
+    provider: str = "nelnet",
+) -> None:
     username_field = _first_visible(
         page,
         ["#username-textfield", "input[name='Username']", "input[data-cy='username']", "input[type='text']"],
@@ -355,12 +375,16 @@ def _fill_credentials(page, username: str, password: str, *, save_username: bool
         ["#password-textfield", "input[name='Password']", "input[data-cy='password']", "input[type='password']"],
     )
     if username_field is None or password_field is None:
-        raise LoginFlowError(f"Nelnet's credential form changed; current URL: {page.url}")
+        raise LoginFlowError(
+            f"{_provider_label(provider)}'s credential form changed; current URL: {page.url}"
+        )
     try:
         username_field.fill(username, timeout=5_000)
         password_field.fill(password, timeout=5_000)
     except Exception as exc:
-        raise LoginFlowError("Nelnet's credential fields could not be filled.") from exc
+        raise LoginFlowError(
+            f"{_provider_label(provider)}'s credential fields could not be filled."
+        ) from exc
 
     remember = _first_visible(page, ["#rememberLogin", "input[name='RememberLogin']"])
     if remember is not None and save_username:
@@ -426,7 +450,9 @@ def _method_pattern(method: str) -> re.Pattern[str]:
     raise LoginFlowError("mfa_method must be 'sms', 'email', or 'authenticator'")
 
 
-def _select_mfa_method(page, mfa_method: str) -> None:
+def _select_mfa_method(
+    page, mfa_method: str, *, provider: str = "nelnet"
+) -> None:
     pattern = _method_pattern(mfa_method)
 
     # Prefer accessible labels; this works whether the site uses radios, cards, or
@@ -476,7 +502,9 @@ def _select_mfa_method(page, mfa_method: str) -> None:
     except Exception:
         pass
 
-    raise LoginFlowError(f"Nelnet did not show an MFA option for '{mfa_method}'.")
+    raise LoginFlowError(
+        f"{_provider_label(provider)} did not show an MFA option for '{mfa_method}'."
+    )
 
 
 def _click_send_code(page) -> bool:
@@ -505,10 +533,12 @@ def _resolve_mfa_code(
     return value
 
 
-def _fill_mfa_code(page, code: str) -> None:
+def _fill_mfa_code(page, code: str, *, provider: str = "nelnet") -> None:
     fields = _code_inputs(page)
     if not fields:
-        raise LoginFlowError(f"Nelnet's MFA code field changed; current URL: {page.url}")
+        raise LoginFlowError(
+            f"{_provider_label(provider)}'s MFA code field changed; current URL: {page.url}"
+        )
     try:
         if len(fields) == 1:
             fields[0].fill(code, timeout=5_000)
@@ -521,7 +551,9 @@ def _fill_mfa_code(page, code: str) -> None:
         for field, character in zip(fields, code):
             field.fill(character, timeout=5_000)
     except Exception as exc:
-        raise LoginFlowError("Nelnet's MFA code field could not be filled.") from exc
+        raise LoginFlowError(
+            f"{_provider_label(provider)}'s MFA code field could not be filled."
+        ) from exc
 
 
 def _remember_device(page) -> None:
@@ -740,6 +772,8 @@ def login_playwright(
                     background=background,
                     viewport={"width": 1440, "height": 1000},
                 )
+                if cfg.provider == "edfinancial":
+                    _clear_edfinancial_session_cookies(context)
                 context.on("response", on_response)
                 context.on(
                     "request",
@@ -768,15 +802,24 @@ def login_playwright(
                     wait_until="domcontentloaded",
                     timeout=60_000,
                 )
-                _open_login_and_terms(page, tracer)
+                _open_login_and_terms(page, tracer, provider=cfg.provider)
                 if _login_error(page):
                     raise LoginFlowError(_login_error(page))
 
                 tracer.capture(page, "before_credentials")
-                _fill_credentials(page, username, password, save_username=save_username)
+                _fill_credentials(
+                    page,
+                    username,
+                    password,
+                    save_username=save_username,
+                    provider=cfg.provider,
+                )
                 submit = _first_visible(page, ["#btnSubmit", "button[data-cy='login']", "button[type='submit']"])
                 if submit is None:
-                    raise LoginFlowError(f"Nelnet's login submit button changed; current URL: {page.url}")
+                    raise LoginFlowError(
+                        f"{_provider_label(cfg.provider)}'s login submit button changed; "
+                        f"current URL: {page.url}"
+                    )
                 submit.click(timeout=10_000)
                 tracer.capture(page, "credentials_submitted", screenshot=False)
 
@@ -850,11 +893,14 @@ def login_playwright(
                     if code_fields and not code_submitted:
                         tracer.capture(page, "mfa_code_form_ready")
                         code = _resolve_mfa_code(get_code=get_code, mfa_code=mfa_code)
-                        _fill_mfa_code(page, code)
+                        _fill_mfa_code(page, code, provider=cfg.provider)
                         if trusted_device:
                             _remember_device(page)
                         if not _click_verify(page):
-                            raise LoginFlowError(f"Nelnet's MFA verification button changed; current URL: {page.url}")
+                            raise LoginFlowError(
+                                f"{_provider_label(cfg.provider)}'s MFA verification button "
+                                f"changed; current URL: {page.url}"
+                            )
                         code_submitted = True
                         tracer.capture(page, "mfa_code_submitted", screenshot=False)
                         page.wait_for_timeout(500)
@@ -862,9 +908,14 @@ def login_playwright(
 
                     if _mfa_choice_present(page) and not choice_submitted:
                         tracer.capture(page, "mfa_choice_form_ready")
-                        _select_mfa_method(page, mfa_method)
+                        _select_mfa_method(
+                            page, mfa_method, provider=cfg.provider
+                        )
                         if not _click_send_code(page):
-                            raise LoginFlowError(f"Nelnet's MFA send-code button changed; current URL: {page.url}")
+                            raise LoginFlowError(
+                                f"{_provider_label(cfg.provider)}'s MFA send-code button "
+                                f"changed; current URL: {page.url}"
+                            )
                         choice_submitted = True
                         tracer.capture(page, "mfa_method_submitted")
                         page.wait_for_timeout(500)

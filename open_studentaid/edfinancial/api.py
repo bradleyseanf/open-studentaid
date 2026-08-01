@@ -8,7 +8,7 @@ from typing import Any, Dict
 
 from bs4 import BeautifulSoup
 
-from ..config import managed_display, session_state_path
+from ..config import managed_display, session_state_path, write_session_state
 from ..exceptions import RefreshFailedError
 
 
@@ -69,6 +69,11 @@ def parse_account_summary(html: str, text: str) -> Dict[str, Any]:
     }
 
 
+def _persist_browser_session(context, state_path) -> None:
+    """Keep cookies rotated during a successful account read for the next run."""
+    write_session_state(state_path, context.storage_state())
+
+
 def borrower_details(provider: str, client_id: str) -> Dict[str, Any]:
     del provider, client_id
     try:
@@ -122,7 +127,9 @@ def borrower_details(provider: str, client_id: str) -> Dict[str, Any]:
                         "The saved Edfinancial browser session expired. "
                         f"Re-login is required; current URL: {page.url}"
                     )
-                return parse_account_summary(page.content(), text)
+                details = parse_account_summary(page.content(), text)
+                _persist_browser_session(context, state_path)
+                return details
             finally:
                 if context is not None:
                     context.close()
